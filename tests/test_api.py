@@ -166,14 +166,14 @@ def test_duplicate_confirm_is_idempotent(client):
     second = client.post(f"/replacements/{rp_id}/batches/1/confirm").json()
     assert second["already_confirmed"] is True and second["written"] == 0
 
-    # 底表只写过一次
+    # 确认只在批次层面落一次状态，不逐格重复写
     conn = sqlite3.connect(db.DB_PATH)
     n = conn.execute(
-        "SELECT COUNT(*) FROM replacement_cell "
+        "SELECT COUNT(*) FROM batch "
         "WHERE replacement_id = ? AND confirmed = 1", (rp_id,)
     ).fetchone()[0]
     conn.close()
-    assert n == 4
+    assert n == 1
 
 
 def test_write_failure_keeps_original_values(client, monkeypatch):
@@ -184,22 +184,19 @@ def test_write_failure_keeps_original_values(client, monkeypatch):
         json={"rows": ROWS, "cols": COLS, "matrix": new},
     ).json()["replacement_id"]
 
-    real_connect = db.connect
     real_execute = sqlite3.Connection.execute
     db_file = db.DB_PATH  # 固定当前测试的库路径
-    state = {"fail_armed": True, "writes": 0}
+    state = {"fail_armed": True}
 
     class FlakyConn(sqlite3.Connection):
         def execute(self, sql, params=()):
             if (
                 state["fail_armed"]
                 and isinstance(sql, str)
-                and sql.lstrip().startswith("UPDATE live_cell")
+                and sql.lstrip().startswith("UPDATE replacement")
             ):
-                state["writes"] += 1
-                if state["writes"] == 2:
-                    # 批次写到一半时模拟磁盘写入失败
-                    raise sqlite3.OperationalError("simulated disk write failure")
+                # 末批在批次状态已改之后模拟磁盘写入失败
+                raise sqlite3.OperationalError("simulated disk write failure")
             return real_execute(self, sql, params)
 
     def flaky_connect(path=None):
@@ -213,15 +210,15 @@ def test_write_failure_keeps_original_values(client, monkeypatch):
 
     r = client.post(f"/replacements/{rp_id}/batches/1/confirm")
     assert r.status_code == 500
-    monkeypatch.setattr(db, "connect", real_connect)
     state["fail_armed"] = False
 
-    # 该批各格都保留原值，批次仍未确认
+    # 该批各格都保留原值，批次仍未确认，申请仍待确认
     table_resp = client.get("/months/2026-11/table")
     assert table_resp.status_code == 200, table_resp.text
     assert table_resp.json()["matrix"] == BASE
     batch = client.get(f"/replacements/{rp_id}/batches").json()[0]
     assert batch["confirmed"] is False
+    assert client.get(f"/replacements/{rp_id}").json()["status"] == "pending"
 
     # 恢复后可正常确认
     ok = client.post(f"/replacements/{rp_id}/batches/1/confirm").json()

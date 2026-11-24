@@ -83,6 +83,11 @@ def connect(db_path: str = None) -> sqlite3.Connection:
 
 
 def init_db(db_path: str = None) -> None:
+    # 命名卷首次挂载或自定义 DB_PATH 的父目录可能尚不存在，先补建
+    path = db_path if db_path is not None else os.environ.get("DB_PATH", DB_PATH)
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     conn = connect(db_path)
     try:
         conn.executescript(SCHEMA)
